@@ -87,7 +87,8 @@ The app can push each account's usage to the **Saúde do sistema → Claude** ta
 ## How it works
 
 - Usage comes from `GET https://api.anthropic.com/api/oauth/usage`, the same endpoint Claude Code's `/usage` command calls, authenticated with the OAuth token from each `.credentials.json`.
-- Each account's email comes from `GET /api/oauth/profile`.
+- Each account's email comes from the `oauthAccount` that Claude Code keeps in its `.claude.json`, falling back to `GET /api/oauth/profile`.
+- Each account is read on its own schedule. When Anthropic answers `429`, that account waits as long as `Retry-After` asks (or backs off 10, 20, 40 and then 60 minutes when the header is missing) while the panel keeps its last values; the other accounts are not affected.
 - When a token is about to expire, the app renews it at `https://platform.claude.com/v1/oauth/token` and writes the result back to `.credentials.json` (atomically). Claude Code notices the file change and picks up the new token.
 - Right after a limit resets, the app polls once more to refresh the numbers.
 

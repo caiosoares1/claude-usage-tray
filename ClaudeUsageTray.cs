@@ -72,12 +72,17 @@ namespace ClaudeUsageTray
         public bool HasCredentials;
         public string Email;
         public string Plan;
-        public string ProfileToken;
         public List<Limit> Limits = new List<Limit>();
         public string Error;
         public bool NeedsLogin;
         public readonly object FileLock = new object();
         public Dictionary<string, double> LastPct = new Dictionary<string, double>();
+
+        // Each account is read on its own schedule; a 429 from Anthropic pushes only that account back.
+        public DateTime NextPollAt = DateTime.MinValue;
+        public DateTime LastPolledAt = DateTime.MinValue;
+        public DateTime? RetryAt;
+        public int RateLimitStrikes;
 
         public string Name { get { return Email ?? Folder; } }
 
@@ -87,11 +92,12 @@ namespace ClaudeUsageTray
             Swap(ref HasCredentials, ref other.HasCredentials);
             Swap(ref Email, ref other.Email);
             Swap(ref Plan, ref other.Plan);
-            Swap(ref ProfileToken, ref other.ProfileToken);
             Swap(ref Limits, ref other.Limits);
             Swap(ref Error, ref other.Error);
             Swap(ref NeedsLogin, ref other.NeedsLogin);
             Swap(ref LastPct, ref other.LastPct);
+            Swap(ref RetryAt, ref other.RetryAt);
+            Swap(ref RateLimitStrikes, ref other.RateLimitStrikes);
         }
 
         static void Swap<T>(ref T x, ref T y)
@@ -262,23 +268,35 @@ namespace ClaudeUsageTray
                 a.NeedsLogin = true;
                 return;
             }
+            string localEmail = LocalEmail(a.Dir);
+            if (localEmail != null) a.Email = localEmail;
             try
             {
                 string token = GetToken(a, false);
                 int status;
-                string body = Http("GET", ApiBase + "/api/oauth/usage", token, null, out status);
+                WebHeaderCollection responseHeaders;
+                string body = Http("GET", ApiBase + "/api/oauth/usage", AuthHeaders(token), null, out status, out responseHeaders);
                 if (status == 401)
                 {
                     token = GetToken(a, true);
-                    body = Http("GET", ApiBase + "/api/oauth/usage", token, null, out status);
+                    body = Http("GET", ApiBase + "/api/oauth/usage", AuthHeaders(token), null, out status, out responseHeaders);
                 }
                 if (status == 401 || status == 403) throw new LoginException();
-                if (status == 429) throw new ApiException("muitas consultas (429), tenta de novo no próximo ciclo");
+                if (status == 429)
+                {
+                    // Wait as long as Anthropic asks; without Retry-After back off 10, 20, 40, 60 min.
+                    a.RateLimitStrikes++;
+                    a.RetryAt = DateTime.Now + (RetryAfter(responseHeaders)
+                        ?? TimeSpan.FromMinutes(Math.Min(60, 10 * Math.Pow(2, a.RateLimitStrikes - 1))));
+                    throw new ApiException("limite de consultas da Anthropic (429): tenta de novo às " + a.RetryAt.Value.ToString("HH:mm"));
+                }
                 if (status != 200) throw new ApiException("HTTP " + status + " ao ler uso");
                 a.Limits = ParseUsage(Json.Parse(body));
-                if (a.Email == null || a.ProfileToken != token) LoadProfile(a, token);
+                if (a.Email == null) LoadProfile(a, token);
                 a.Error = null;
                 a.NeedsLogin = false;
+                a.RetryAt = null;
+                a.RateLimitStrikes = 0;
             }
             catch (ApiException ex) { a.Error = ex.Message; a.NeedsLogin = ex is LoginException; }
             catch (WebException ex) { a.Error = "sem conexão (" + ex.Status + ")"; }
@@ -345,9 +363,36 @@ namespace ClaudeUsageTray
                 if (status != 200) return;
                 var account = Json.Get(Json.Parse(body), "account") as Dictionary<string, object>;
                 if (account != null) a.Email = Json.Str(account, "email");
-                a.ProfileToken = token;
             }
             catch { }
+        }
+
+        // Claude Code keeps the signed-in account in its global config (oauthAccount.emailAddress): reading it
+        // saves an API call and still names the account while Anthropic is rate limiting it.
+        static string LocalEmail(string dir)
+        {
+            try
+            {
+                string path = Paths.GlobalConfig(dir);
+                if (!File.Exists(path)) return null;
+                string oauthAccount = JsonText.Get(File.ReadAllText(path), "oauthAccount");
+                return oauthAccount == null ? null : Json.Str(Json.Parse(oauthAccount), "emailAddress");
+            }
+            catch { return null; }
+        }
+
+        // Retry-After in seconds or as an HTTP date.
+        static TimeSpan? RetryAfter(WebHeaderCollection headers)
+        {
+            string value = headers == null ? null : headers["Retry-After"];
+            if (string.IsNullOrEmpty(value)) return null;
+            int seconds;
+            if (int.TryParse(value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out seconds))
+                return TimeSpan.FromSeconds(Math.Max(30, seconds + 5));
+            DateTime at;
+            if (DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out at))
+                return TimeSpan.FromSeconds(Math.Max(30, (at - DateTime.UtcNow).TotalSeconds + 5));
+            return null;
         }
 
         static List<Limit> ParseUsage(Dictionary<string, object> usage)
@@ -408,7 +453,7 @@ namespace ClaudeUsageTray
             return (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
         }
 
-        static string Http(string method, string url, string token, string body, out int status)
+        static Dictionary<string, string> AuthHeaders(string token)
         {
             var headers = new Dictionary<string, string>();
             if (token != null)
@@ -416,10 +461,22 @@ namespace ClaudeUsageTray
                 headers["Authorization"] = "Bearer " + token;
                 headers["anthropic-beta"] = "oauth-2025-04-20";
             }
-            return Http(method, url, headers, body, out status);
+            return headers;
+        }
+
+        static string Http(string method, string url, string token, string body, out int status)
+        {
+            return Http(method, url, AuthHeaders(token), body, out status);
         }
 
         internal static string Http(string method, string url, Dictionary<string, string> headers, string body, out int status)
+        {
+            WebHeaderCollection responseHeaders;
+            return Http(method, url, headers, body, out status, out responseHeaders);
+        }
+
+        static string Http(string method, string url, Dictionary<string, string> headers, string body,
+            out int status, out WebHeaderCollection responseHeaders)
         {
             var req = (HttpWebRequest)WebRequest.Create(url);
             req.Method = method;
@@ -445,6 +502,7 @@ namespace ClaudeUsageTray
             using (var reader = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
             {
                 status = (int)resp.StatusCode;
+                responseHeaders = resp.Headers;
                 return reader.ReadToEnd();
             }
         }
@@ -841,7 +899,6 @@ namespace ClaudeUsageTray
 
         readonly NotifyIcon tray = new NotifyIcon();
         readonly PopupForm popup;
-        readonly System.Windows.Forms.Timer pollTimer = new System.Windows.Forms.Timer();
         readonly System.Windows.Forms.Timer tickTimer = new System.Windows.Forms.Timer();
         readonly Dictionary<string, Account> known = new Dictionary<string, Account>(StringComparer.OrdinalIgnoreCase);
         readonly Settings settings = Settings.Load();
@@ -880,29 +937,40 @@ namespace ClaudeUsageTray
             UpdateTray();
             tray.Visible = true;
 
-            pollTimer.Interval = settings.IntervalMin * 60000;
-            pollTimer.Tick += (s, e) => Refresh();
-            pollTimer.Start();
             tickTimer.Interval = 30000;
             tickTimer.Tick += (s, e) => OnTick();
             tickTimer.Start();
-            Refresh();
+            Refresh(true);
         }
 
-        public void Refresh()
+        // Reads the accounts that are due; `force` reads all of them now. Accounts Anthropic asked
+        // to wait (429) are skipped either way: asking again early only extends the block.
+        public void Refresh(bool force = false)
         {
-            if (Refreshing) { refreshQueued = true; return; }
+            if (Refreshing) { if (force) refreshQueued = true; return; }
+            var now = DateTime.Now;
+            var list = DiscoverAccounts();
+            var due = list.Where(a => (force || a.NextPollAt <= now) && !(a.RetryAt > now)).ToList();
+            if (due.Count == 0)
+            {
+                if (force) AfterRefresh(list, due);
+                return;
+            }
             Refreshing = true;
             popup.Invalidate();
-            var list = DiscoverAccounts();
-            Task.Factory.StartNew(() => Parallel.ForEach(list, Api.Update))
-                .ContinueWith(t => popup.BeginInvoke((Action)(() => AfterRefresh(list))));
+            Task.Factory.StartNew(() => Parallel.ForEach(due, Api.Update))
+                .ContinueWith(t => popup.BeginInvoke((Action)(() => AfterRefresh(list, due))));
         }
 
-        void AfterRefresh(List<Account> list)
+        void AfterRefresh(List<Account> list, List<Account> polled)
         {
             Refreshing = false;
             LastRefresh = DateTime.Now;
+            foreach (var a in polled)
+            {
+                a.LastPolledAt = DateTime.Now;
+                a.NextPollAt = DateTime.Now.AddMinutes(settings.IntervalMin);
+            }
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             Accounts = list.Where(a => a.Email == null || seen.Add(a.Email)).ToList();
             Notify();
@@ -915,7 +983,7 @@ namespace ClaudeUsageTray
                 pendingSwitch = null;
                 MakeActive(target);
             }
-            else if (refreshQueued) { refreshQueued = false; Refresh(); }
+            else if (refreshQueued) { refreshQueued = false; Refresh(true); }
         }
 
         // Makes `target` the account Claude Code uses by default, swapping its login with the main config dir.
@@ -950,7 +1018,7 @@ namespace ClaudeUsageTray
                 }
                 UpdateTray();
                 popup.Relayout();
-                Refresh();
+                Refresh(true);
             })));
         }
 
@@ -1059,11 +1127,15 @@ namespace ClaudeUsageTray
 
         void OnTick()
         {
-            // Poll right after a window resets so the panel shows the fresh numbers.
+            // Read an account right after one of its windows resets, so the panel shows the fresh numbers.
             var now = DateTime.Now;
-            bool resetPassed = Accounts.Any(a => a.Limits.Any(l =>
-                l.ResetsAt.HasValue && l.ResetsAt.Value.AddSeconds(20) <= now && LastRefresh < l.ResetsAt.Value.AddSeconds(20)));
-            if (resetPassed) Refresh();
+            foreach (var a in Accounts)
+            {
+                if (a.Limits.Any(l => l.ResetsAt.HasValue && l.ResetsAt.Value.AddSeconds(20) <= now
+                        && a.LastPolledAt < l.ResetsAt.Value.AddSeconds(20)))
+                    a.NextPollAt = now;
+            }
+            Refresh();
             UpdateTray();
             if (popup.Visible) popup.Invalidate();
         }
@@ -1171,7 +1243,7 @@ namespace ClaudeUsageTray
             switchMenu.DropDownOpening += (s, e) => FillSwitchMenu(switchMenu);
             m.Items.Add(switchMenu);
             m.Items.Add(new ToolStripSeparator());
-            m.Items.Add("Atualizar agora", null, (s, e) => Refresh());
+            m.Items.Add("Atualizar agora", null, (s, e) => Refresh(true));
             m.Items.Add("Adicionar conta...", null, (s, e) => AddAccount());
             m.Items.Add("Abrir pasta das contas", null, (s, e) =>
             {
@@ -1188,7 +1260,8 @@ namespace ClaudeUsageTray
                 {
                     settings.IntervalMin = (int)((ToolStripMenuItem)s).Tag;
                     settings.Save();
-                    pollTimer.Interval = settings.IntervalMin * 60000;
+                    var latest = DateTime.Now.AddMinutes(settings.IntervalMin);
+                    foreach (var a in known.Values) if (a.NextPollAt > latest) a.NextPollAt = latest;
                     popup.Invalidate();
                 };
                 interval.DropDownItems.Add(item);
@@ -1235,7 +1308,7 @@ namespace ClaudeUsageTray
             }
             Directory.CreateDirectory(dir);
             Login(dir, false);
-            Refresh();
+            Refresh(true);
         }
 
         // Opens a console running `claude auth login` against the account's config dir.
@@ -1248,7 +1321,7 @@ namespace ClaudeUsageTray
             else psi.EnvironmentVariables["CLAUDE_CONFIG_DIR"] = dir;
             var p = Process.Start(psi);
             p.EnableRaisingEvents = true;
-            p.Exited += (s, e) => popup.BeginInvoke((Action)Refresh);
+            p.Exited += (s, e) => popup.BeginInvoke((Action)(() => Refresh(true)));
         }
 
         static string UseCommand(Account a)
@@ -1366,7 +1439,7 @@ namespace ClaudeUsageTray
         {
             base.OnKeyDown(e);
             if (e.KeyCode == Keys.Escape) HidePopup();
-            if (e.KeyCode == Keys.F5) app.Refresh();
+            if (e.KeyCode == Keys.F5) app.Refresh(true);
         }
 
         float AccountHeight(Account a)
@@ -1507,7 +1580,7 @@ namespace ClaudeUsageTray
         protected override void OnMouseClick(MouseEventArgs e)
         {
             base.OnMouseClick(e);
-            if (refreshRect.Contains(e.Location)) { app.Refresh(); return; }
+            if (refreshRect.Contains(e.Location)) { app.Refresh(true); return; }
             if (addRect.Contains(e.Location)) { HidePopup(); app.AddAccount(); return; }
             var a = RowAt(e.Location);
             if (a != null) app.ShowAccountMenu(a, this, e.Location);
