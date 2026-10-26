@@ -70,8 +70,19 @@ As a result:
 | Atualizar a cada | Polling interval: 2, 5 (default), 10, 15 or 30 min |
 | Notificações | Turns notifications on/off |
 | Iniciar com o Windows | Turns the entry in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` on/off |
+| Integração com Way Project... | Configures the optional push to Way Project (see below) and shows the last result |
 
 Preferences are stored in `%APPDATA%\ClaudeUsageTray\settings.json`.
+
+## Way Project integration (optional)
+
+The app can push each account's usage to the **Saúde do sistema → Claude** tab of Way Project, through its `health-ingest` Edge Function. Right-click the icon → **Integração com Way Project...**, then paste the function URL and the shared secret (setup steps are in `ops/claude-usage-tray/README.md` of the way-project repo).
+
+- **No tokens are sent.** A report holds each account's email, plan, usage percentages, reset times, the machine name and which account Claude Code is using on it.
+- Reports are signed with HMAC-SHA256 (headers `X-Health-Agent: claude-usage-tray`, `X-Health-Timestamp`, `X-Health-Signature` over `timestamp.body`).
+- The secret is stored encrypted for your Windows user (DPAPI) in `settings.json`.
+- A report goes out after every poll. Accounts whose read failed for a transient reason are left out, so Way Project keeps their last values; accounts whose login expired are reported as degraded.
+- The menu item shows the result of the last report.
 
 ## How it works
 

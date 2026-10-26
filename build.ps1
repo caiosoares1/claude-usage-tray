@@ -6,7 +6,7 @@ $out = Join-Path $PSScriptRoot 'ClaudeUsageTray.exe'
 Get-Process ClaudeUsageTray -ErrorAction SilentlyContinue | Stop-Process -Force
 
 & $csc /nologo /target:winexe /optimize+ /out:$out `
-    /r:System.Web.Extensions.dll /r:Microsoft.VisualBasic.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll `
+    /r:System.Web.Extensions.dll /r:Microsoft.VisualBasic.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Security.dll `
     (Join-Path $PSScriptRoot 'ClaudeUsageTray.cs')
 if ($LASTEXITCODE -ne 0) { throw "csc falhou ($LASTEXITCODE)" }
 Write-Host "OK: $out"

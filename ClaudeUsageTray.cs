@@ -15,6 +15,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -74,6 +75,7 @@ namespace ClaudeUsageTray
         public string ProfileToken;
         public List<Limit> Limits = new List<Limit>();
         public string Error;
+        public bool NeedsLogin;
         public readonly object FileLock = new object();
         public Dictionary<string, double> LastPct = new Dictionary<string, double>();
 
@@ -88,6 +90,7 @@ namespace ClaudeUsageTray
             Swap(ref ProfileToken, ref other.ProfileToken);
             Swap(ref Limits, ref other.Limits);
             Swap(ref Error, ref other.Error);
+            Swap(ref NeedsLogin, ref other.NeedsLogin);
             Swap(ref LastPct, ref other.LastPct);
         }
 
@@ -235,12 +238,18 @@ namespace ClaudeUsageTray
         public ApiException(string message) : base(message) { }
     }
 
+    // The account has to sign in again (login expired or revoked).
+    class LoginException : ApiException
+    {
+        public LoginException() : base("login expirou: clique para relogar") { }
+        public LoginException(string message) : base(message) { }
+    }
+
     static class Api
     {
         const string ApiBase = "https://api.anthropic.com";
         const string TokenUrl = "https://platform.claude.com/v1/oauth/token";
         const string ClientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-        const string Relogin = "login expirou: clique para relogar";
 
         public static void Update(Account a)
         {
@@ -250,6 +259,7 @@ namespace ClaudeUsageTray
             {
                 a.Limits = new List<Limit>();
                 a.Error = "sem login: clique para logar";
+                a.NeedsLogin = true;
                 return;
             }
             try
@@ -262,14 +272,15 @@ namespace ClaudeUsageTray
                     token = GetToken(a, true);
                     body = Http("GET", ApiBase + "/api/oauth/usage", token, null, out status);
                 }
-                if (status == 401 || status == 403) throw new ApiException(Relogin);
+                if (status == 401 || status == 403) throw new LoginException();
                 if (status == 429) throw new ApiException("muitas consultas (429), tenta de novo no próximo ciclo");
                 if (status != 200) throw new ApiException("HTTP " + status + " ao ler uso");
                 a.Limits = ParseUsage(Json.Parse(body));
                 if (a.Email == null || a.ProfileToken != token) LoadProfile(a, token);
                 a.Error = null;
+                a.NeedsLogin = false;
             }
-            catch (ApiException ex) { a.Error = ex.Message; }
+            catch (ApiException ex) { a.Error = ex.Message; a.NeedsLogin = ex is LoginException; }
             catch (WebException ex) { a.Error = "sem conexão (" + ex.Status + ")"; }
             catch (Exception ex) { a.Error = ex.Message; }
         }
@@ -282,12 +293,12 @@ namespace ClaudeUsageTray
                 string path = Path.Combine(a.Dir, ".credentials.json");
                 var root = Json.ReadFile(path);
                 var oauth = Json.Get(root, "claudeAiOauth") as Dictionary<string, object>;
-                if (oauth == null) throw new ApiException("credencial sem login do claude.ai: clique para logar");
+                if (oauth == null) throw new LoginException("credencial sem login do claude.ai: clique para logar");
                 string access = Json.Str(oauth, "accessToken");
                 string refresh = Json.Str(oauth, "refreshToken");
                 a.Plan = Json.Str(oauth, "subscriptionType");
                 if (!force && access != null && Json.Long(oauth, "expiresAt") - NowMs() > marginMs) return access;
-                if (string.IsNullOrEmpty(refresh)) throw new ApiException(Relogin);
+                if (string.IsNullOrEmpty(refresh)) throw new LoginException();
 
                 var req = new Dictionary<string, object>();
                 req["grant_type"] = "refresh_token";
@@ -296,14 +307,14 @@ namespace ClaudeUsageTray
                 var scopes = Json.Get(oauth, "scopes") as IEnumerable;
                 if (scopes != null && !(scopes is string)) req["scope"] = string.Join(" ", scopes.Cast<object>());
                 int status;
-                string resp = Http("POST", TokenUrl, null, Json.Write(req), out status);
+                string resp = Http("POST", TokenUrl, (string)null, Json.Write(req), out status);
                 if (status != 200)
                 {
                     // Claude Code may have rotated the refresh token at the same time: use what is on disk now.
                     var again = Json.Get(Json.ReadFile(path), "claudeAiOauth") as Dictionary<string, object>;
                     if (again != null && Json.Str(again, "refreshToken") != refresh && Json.Long(again, "expiresAt") - NowMs() > 60 * 1000)
                         return Json.Str(again, "accessToken");
-                    if (status == 400 || status == 401) throw new ApiException(Relogin);
+                    if (status == 400 || status == 401) throw new LoginException();
                     throw new ApiException("falha ao renovar token (HTTP " + status + ")");
                 }
 
@@ -392,12 +403,23 @@ namespace ClaudeUsageTray
             return s.Length == 0 ? s : char.ToUpperInvariant(s[0]) + s.Substring(1);
         }
 
-        static long NowMs()
+        internal static long NowMs()
         {
             return (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
         }
 
         static string Http(string method, string url, string token, string body, out int status)
+        {
+            var headers = new Dictionary<string, string>();
+            if (token != null)
+            {
+                headers["Authorization"] = "Bearer " + token;
+                headers["anthropic-beta"] = "oauth-2025-04-20";
+            }
+            return Http(method, url, headers, body, out status);
+        }
+
+        internal static string Http(string method, string url, Dictionary<string, string> headers, string body, out int status)
         {
             var req = (HttpWebRequest)WebRequest.Create(url);
             req.Method = method;
@@ -405,11 +427,7 @@ namespace ClaudeUsageTray
             req.ReadWriteTimeout = 20000;
             req.UserAgent = "claude-usage-tray/1.0";
             req.Accept = "application/json";
-            if (token != null)
-            {
-                req.Headers["Authorization"] = "Bearer " + token;
-                req.Headers["anthropic-beta"] = "oauth-2025-04-20";
-            }
+            foreach (var header in headers) req.Headers[header.Key] = header.Value;
             if (body != null)
             {
                 req.ContentType = "application/json";
@@ -541,8 +559,30 @@ namespace ClaudeUsageTray
         public int IntervalMin = 5;
         public bool Notify = true;
         public bool IsNew = true;
+        public string IngestUrl;
+        string ingestSecretProtected;
 
         static string FilePath { get { return Path.Combine(Paths.AppData, "settings.json"); } }
+
+        // The integration secret is stored encrypted for the current Windows user (DPAPI).
+        public string IngestSecret
+        {
+            get
+            {
+                if (string.IsNullOrEmpty(ingestSecretProtected)) return null;
+                try
+                {
+                    var bytes = ProtectedData.Unprotect(Convert.FromBase64String(ingestSecretProtected), null, DataProtectionScope.CurrentUser);
+                    return Encoding.UTF8.GetString(bytes);
+                }
+                catch { return null; }
+            }
+            set
+            {
+                ingestSecretProtected = string.IsNullOrEmpty(value) ? null : Convert.ToBase64String(
+                    ProtectedData.Protect(Encoding.UTF8.GetBytes(value), null, DataProtectionScope.CurrentUser));
+            }
+        }
 
         public static Settings Load()
         {
@@ -554,6 +594,8 @@ namespace ClaudeUsageTray
                 long interval = Json.Long(d, "intervalMin");
                 if (interval >= 1) s.IntervalMin = (int)interval;
                 if (Json.Get(d, "notify") is bool) s.Notify = (bool)Json.Get(d, "notify");
+                s.IngestUrl = Json.Str(d, "ingestUrl");
+                s.ingestSecretProtected = Json.Str(d, "ingestSecret");
             }
             catch { }
             return s;
@@ -567,9 +609,169 @@ namespace ClaudeUsageTray
                 var d = new Dictionary<string, object>();
                 d["intervalMin"] = IntervalMin;
                 d["notify"] = Notify;
+                if (!string.IsNullOrEmpty(IngestUrl)) d["ingestUrl"] = IngestUrl;
+                if (!string.IsNullOrEmpty(ingestSecretProtected)) d["ingestSecret"] = ingestSecretProtected;
                 File.WriteAllText(FilePath, Json.Write(d), new UTF8Encoding(false));
             }
             catch { }
+        }
+    }
+
+    // Optional: sends each account's usage (never tokens) to Way Project's health-ingest Edge Function,
+    // signed with HMAC-SHA256 as in its contract v1. Way Project shows it under Saúde do sistema → Claude.
+    static class WayProject
+    {
+        public const string Agent = "claude-usage-tray";
+
+        // Returns null when the report was accepted (or there was nothing to send), otherwise the error.
+        public static string Send(string url, string secret, List<Account> accounts)
+        {
+            var components = accounts.Select(Component).Where(c => c != null).Take(30).ToList();
+            if (components.Count == 0) return null;
+            var payload = new Dictionary<string, object>();
+            payload["version"] = 1;
+            payload["agent"] = Agent;
+            payload["components"] = components;
+            string body = Json.Write(payload);
+            string timestamp = Api.NowMs().ToString(CultureInfo.InvariantCulture);
+            var headers = new Dictionary<string, string>();
+            headers["X-Health-Agent"] = Agent;
+            headers["X-Health-Timestamp"] = timestamp;
+            headers["X-Health-Signature"] = Sign(secret, timestamp + "." + body);
+
+            int status;
+            string response;
+            try { response = Api.Http("POST", url, headers, body, out status); }
+            catch (WebException ex) { return "sem conexão (" + ex.Status + ")"; }
+            if (status == 200) return null;
+            string message = null;
+            try { message = Json.Str(Json.Parse(response), "error"); } catch { }
+            return "HTTP " + status + (message != null ? ": " + message : "");
+        }
+
+        static string Sign(string secret, string data)
+        {
+            using (var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret)))
+                return string.Concat(hmac.ComputeHash(Encoding.UTF8.GetBytes(data)).Select(b => b.ToString("x2")));
+        }
+
+        static Dictionary<string, object> Component(Account a)
+        {
+            if (a.Email == null) return null;
+            if (!a.NeedsLogin && a.Error != null) return null; // transient failure: the last report stays
+            string email = a.Email.ToLowerInvariant();
+            string key = "claude:" + Regex.Replace(email, "[^a-z0-9_.@-]", "-");
+            var c = new Dictionary<string, object>();
+            c["key"] = key.Length > 120 ? key.Substring(0, 120) : key;
+            c["kind"] = "claude";
+            c["name"] = email.Length > 80 ? email.Substring(0, 80) : email;
+
+            var details = new Dictionary<string, object>();
+            if (a.Plan != null) details["plan"] = a.Plan;
+            details["active"] = a.IsMain;
+            details["machine"] = Environment.MachineName;
+            c["details"] = details;
+            if (a.NeedsLogin)
+            {
+                c["status"] = "degraded";
+                c["summary"] = "Login expirado: relogar pelo Claude Usage Tray";
+                details["limits"] = new object[0];
+                return c;
+            }
+
+            var metrics = new Dictionary<string, object>();
+            var limits = new List<object>();
+            var parts = new List<string>();
+            foreach (var l in a.Limits)
+            {
+                double pct = Math.Round(l.Effective, 1);
+                string metric = MetricName(l.Kind);
+                if (metric != null && !metrics.ContainsKey(metric)) metrics[metric] = pct;
+                var limit = new Dictionary<string, object>();
+                limit["kind"] = l.Kind;
+                limit["label"] = l.Label;
+                limit["pct"] = pct;
+                if (l.ResetsAt.HasValue)
+                    limit["resets_at"] = l.ResetsAt.Value.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
+                limits.Add(limit);
+                parts.Add(l.Label + " " + Fmt.Pct(pct));
+            }
+            string summary = string.Join(" · ", parts);
+            c["status"] = "ok";
+            c["summary"] = summary.Length > 200 ? summary.Substring(0, 200) : summary;
+            c["metrics"] = metrics;
+            details["current"] = metrics;
+            details["limits"] = limits;
+            return c;
+        }
+
+        // session -> session_pct, weekly_all -> weekly_pct, weekly_opus -> weekly_opus_pct.
+        static string MetricName(string kind)
+        {
+            if (kind == "session") return "session_pct";
+            if (kind == "weekly_all") return "weekly_pct";
+            string name = Regex.Replace(kind.ToLowerInvariant(), "[^a-z0-9_]", "_") + "_pct";
+            return Regex.IsMatch(name, "^[a-z][a-z0-9_]{0,39}$") ? name : null;
+        }
+    }
+
+    class IntegrationForm : Form
+    {
+        readonly TextBox url = new TextBox();
+        readonly TextBox secret = new TextBox();
+
+        public string Url { get { return url.Text.Trim(); } }
+        public string Secret { get { return secret.Text.Trim(); } }
+
+        public IntegrationForm(string currentUrl, bool hasSecret)
+        {
+            Text = "Integração com Way Project";
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.CenterScreen;
+            AutoScaleDimensions = new SizeF(96f, 96f);
+            AutoScaleMode = AutoScaleMode.Dpi;
+            Font = new Font("Segoe UI", 9f);
+            ClientSize = new Size(480, 244);
+
+            var intro = new Label
+            {
+                Text = "Envia o uso de cada conta (sem tokens) para Saúde do sistema → Claude no Way Project. " +
+                       "A URL e o segredo estão em ops/claude-usage-tray/README.md do way-project.",
+                Location = new Point(16, 14),
+                Size = new Size(448, 36)
+            };
+            var urlLabel = new Label { Text = "URL da Edge Function health-ingest", Location = new Point(16, 60), AutoSize = true };
+            url.Location = new Point(16, 80);
+            url.Size = new Size(448, 23);
+            url.Text = currentUrl ?? "";
+            var secretLabel = new Label
+            {
+                Text = hasSecret ? "Segredo (deixe vazio para manter o atual)" : "Segredo (CLAUDE_USAGE_INGEST_SECRET)",
+                Location = new Point(16, 116),
+                AutoSize = true
+            };
+            secret.Location = new Point(16, 136);
+            secret.Size = new Size(448, 23);
+            secret.UseSystemPasswordChar = true;
+
+            var disable = new Button { Text = "Desativar", DialogResult = DialogResult.Abort, Location = new Point(16, 196), Size = new Size(96, 30), Enabled = !string.IsNullOrEmpty(currentUrl) };
+            var save = new Button { Text = "Salvar e enviar", Location = new Point(244, 196), Size = new Size(124, 30) };
+            var cancel = new Button { Text = "Cancelar", DialogResult = DialogResult.Cancel, Location = new Point(376, 196), Size = new Size(88, 30) };
+            save.Click += (s, e) =>
+            {
+                if (!Regex.IsMatch(Url, @"^https://\S+$"))
+                    MessageBox.Show(this, "Informe a URL https da função health-ingest.", Text);
+                else if ((!hasSecret || Secret.Length > 0) && Secret.Length < 16)
+                    MessageBox.Show(this, "Informe o segredo (pelo menos 16 caracteres).", Text);
+                else
+                    DialogResult = DialogResult.OK;
+            };
+            AcceptButton = save;
+            CancelButton = cancel;
+            Controls.AddRange(new Control[] { intro, urlLabel, url, secretLabel, secret, disable, save, cancel });
         }
     }
 
@@ -645,6 +847,9 @@ namespace ClaudeUsageTray
         readonly Settings settings = Settings.Load();
         bool refreshQueued;
         Account pendingSwitch, suggested;
+        bool syncing;
+        string syncStatus;
+        Action<string> onSynced;
         Icon icon;
 
         public List<Account> Accounts = new List<Account>();
@@ -703,6 +908,7 @@ namespace ClaudeUsageTray
             Notify();
             UpdateTray();
             popup.Relayout();
+            Sync();
             if (pendingSwitch != null)
             {
                 var target = pendingSwitch;
@@ -746,6 +952,51 @@ namespace ClaudeUsageTray
                 popup.Relayout();
                 Refresh();
             })));
+        }
+
+        // Pushes the latest usage to Way Project when the integration is configured.
+        void Sync()
+        {
+            string url = settings.IngestUrl, secret = settings.IngestSecret;
+            if (syncing || string.IsNullOrEmpty(url) || secret == null) return;
+            syncing = true;
+            var snapshot = Accounts.ToList();
+            Task.Factory.StartNew(() => WayProject.Send(url, secret, snapshot))
+                .ContinueWith(t => popup.BeginInvoke((Action)(() =>
+                {
+                    syncing = false;
+                    string error = t.Exception != null ? t.Exception.GetBaseException().Message : t.Result;
+                    syncStatus = error == null ? "enviado às " + DateTime.Now.ToString("HH:mm") : "erro: " + error;
+                    var callback = onSynced;
+                    onSynced = null;
+                    if (callback != null) callback(error);
+                })));
+        }
+
+        void ConfigureIntegration()
+        {
+            using (var form = new IntegrationForm(settings.IngestUrl, settings.IngestSecret != null))
+            {
+                var result = form.ShowDialog();
+                if (result == DialogResult.Abort)
+                {
+                    settings.IngestUrl = null;
+                    settings.IngestSecret = null;
+                    settings.Save();
+                    syncStatus = null;
+                    Balloon("Integração desativada", "O app parou de enviar o uso para o Way Project.", ToolTipIcon.Info, null);
+                    return;
+                }
+                if (result != DialogResult.OK) return;
+                settings.IngestUrl = form.Url;
+                if (form.Secret.Length > 0) settings.IngestSecret = form.Secret;
+                settings.Save();
+            }
+            onSynced = error => Balloon(
+                error == null ? "Way Project conectado" : "Way Project: falha no envio",
+                error ?? "Uso das contas enviado. Veja em Saúde do sistema → Claude.",
+                error == null ? ToolTipIcon.Info : ToolTipIcon.Error, null);
+            Sync();
         }
 
         Account BestAlternative()
@@ -955,6 +1206,13 @@ namespace ClaudeUsageTray
             var startup = new ToolStripMenuItem("Iniciar com o Windows") { CheckOnClick = true, Checked = Startup.IsEnabled() };
             startup.CheckedChanged += (s, e) => Startup.Set(startup.Checked);
             m.Items.Add(startup);
+
+            var integration = new ToolStripMenuItem("Integração com Way Project...");
+            integration.Click += (s, e) => ConfigureIntegration();
+            m.Items.Add(integration);
+            m.Opening += (s, e) => integration.Text = string.IsNullOrEmpty(settings.IngestUrl)
+                ? "Integração com Way Project..."
+                : "Integração com Way Project (" + (syncStatus ?? "aguardando envio") + ")...";
 
             m.Items.Add(new ToolStripSeparator());
             m.Items.Add("Sair", null, (s, e) => ExitThread());
