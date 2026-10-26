@@ -1,26 +1,28 @@
 # Claude Usage Tray
 
-Monitor para Windows que fica ao lado do relógio, na barra de tarefas, e mostra o uso dos limites do plano Claude (sessão de 5h e semanal) de **várias contas ao mesmo tempo**, avisa quando uma conta está chegando no limite e troca a conta usada pelo Claude Code com um clique.
+A Windows system tray app that shows plan usage limits (5-hour session and weekly) for **several Claude accounts at once**, warns you when an account is close to its limit, and switches the account Claude Code uses with a single click.
 
-![Painel](docs/painel.png)
+![Panel](docs/painel.png)
 
-## Recursos
+> The app's interface is in Brazilian Portuguese.
 
-- **Ícone ao lado do relógio** com uma barrinha por conta, preenchida pelo limite mais apertado dela: verde (< 70%), amarelo (70–90%), vermelho (≥ 90%).
-- **Painel** (clique esquerdo no ícone) com a sessão de 5h, o limite semanal e outros limites que o plano tiver, mostrando a porcentagem e quando cada um reseta.
-- **Notificações** quando uma conta passa de 80%, chega a 100% e quando é liberada de novo.
-- **Troca rápida de conta**: a conta escolhida passa a ser a padrão do Claude Code, mantendo suas configurações, plugins e histórico do `~/.claude`.
-- **Sugestão automática**: quando a conta em uso passa de 80%, a notificação oferece trocar para a conta com mais folga.
-- **Renovação de token**: o app renova os tokens OAuth que vencem (eles duram cerca de 8h), então contas paradas continuam aparecendo.
-- **Inicia com o Windows** (ativado na primeira execução, dá pra desligar no menu).
+## Features
 
-## Requisitos
+- **Tray icon** with one bar per account, filled by that account's tightest limit: green (< 70%), yellow (70–90%), red (≥ 90%).
+- **Panel** (left-click the icon) showing the 5-hour session, the weekly limit and any other limits the plan has, with the percentage used and when each one resets.
+- **Notifications** when an account crosses 80%, hits 100%, and when it frees up again.
+- **Quick account switching**: the chosen account becomes Claude Code's default, while your settings, plugins and history in `~/.claude` stay as they are.
+- **Automatic suggestion**: when the active account crosses 80%, the notification offers to switch to the account with the most headroom.
+- **Token refresh**: the app renews OAuth tokens as they expire (they last about 8 hours), so idle accounts keep showing up.
+- **Starts with Windows** (enabled on first run, can be turned off from the menu).
 
-- Windows 10 ou 11
-- .NET Framework 4.x, que já vem com o Windows (não precisa instalar SDK)
-- [Claude Code](https://code.claude.com) instalado (`claude` no PATH) e contas Claude com plano Pro, Max ou Team
+## Requirements
 
-## Instalação
+- Windows 10 or 11
+- .NET Framework 4.x, which ships with Windows (no SDK needed)
+- [Claude Code](https://code.claude.com) installed (`claude` on your PATH) and Claude accounts on a Pro, Max or Team plan
+
+## Installation
 
 ```powershell
 git clone https://github.com/caiosoares1/claude-usage-tray.git
@@ -29,64 +31,64 @@ cd claude-usage-tray
 .\ClaudeUsageTray.exe
 ```
 
-O `build.ps1` compila com o `csc.exe` que vem com o .NET Framework e gera o `ClaudeUsageTray.exe` na pasta do projeto. Na primeira execução o app se registra para iniciar com o Windows, apontando para esse `.exe`. Se você mover o arquivo, abra-o uma vez do novo lugar e o caminho é atualizado.
+`build.ps1` compiles with the `csc.exe` that comes with .NET Framework and writes `ClaudeUsageTray.exe` to the project folder. On first run the app registers itself to start with Windows, pointing at that `.exe`. If you move the file, run it once from its new location and the path is updated.
 
-Se o ícone cair na área de ícones ocultos (a setinha `^` da barra de tarefas), arraste-o para a barra para deixá-lo sempre visível.
+If the icon lands in the hidden icons area (the `^` arrow on the taskbar), drag it onto the taskbar to keep it visible.
 
-## Adicionando contas
+## Adding accounts
 
-A conta logada no Claude Code (`~/.claude`) aparece automaticamente. Para as outras:
+The account logged in to Claude Code (`~/.claude`) shows up automatically. For the others:
 
-1. Clique direito no ícone e escolha **Adicionar conta...**
-2. Dê um nome curto (vira a pasta `%USERPROFILE%\.claude-contas\<nome>`).
-3. Abre um terminal com `claude auth login`: faça o login com a conta desejada.
+1. Right-click the icon and choose **Adicionar conta...** (Add account).
+2. Pick a short name (it becomes the folder `%USERPROFILE%\.claude-contas\<name>`).
+3. A terminal opens running `claude auth login`: sign in with the account you want.
 
-> O login usa a conta que estiver aberta no navegador. Antes de autorizar, troque de conta no claude.ai ou abra o link numa janela anônima.
+> The login uses whichever account is signed in to your browser. Before authorizing, switch accounts on claude.ai or open the link in a private window.
 
-Cada pasta em `.claude-contas` é um `CLAUDE_CONFIG_DIR` independente. Para usar uma conta específica só num terminal, clique nela no painel e escolha **Copiar comando para usar no terminal**.
+Each folder in `.claude-contas` is an independent `CLAUDE_CONFIG_DIR`. To use a specific account in a single terminal only, click it in the panel and choose **Copiar comando para usar no terminal** (Copy command to use in the terminal).
 
-## Trocando a conta do Claude Code
+## Switching Claude Code's account
 
-Pelo menu do ícone (**Trocar conta do Claude Code**), pelo painel (clique na conta → **Usar no Claude Code**) ou clicando na notificação de sugestão.
+From the icon menu (**Trocar conta do Claude Code**), from the panel (click the account → **Usar no Claude Code**), or by clicking the suggestion notification.
 
-Na troca, o app **move** o login entre o `~/.claude` e a pasta da conta escolhida: o `.credentials.json` e o campo `oauthAccount` do `.claude.json`. O resto do `~/.claude.json` não é alterado. Mover em vez de copiar é proposital: o refresh token é rotacionado a cada renovação, então duas cópias do mesmo login acabariam invalidando uma à outra.
+When switching, the app **moves** the login between `~/.claude` and the chosen account's folder: the `.credentials.json` file and the `oauthAccount` field of `.claude.json`. Nothing else in `~/.claude.json` is touched. Moving instead of copying is deliberate: the refresh token rotates on every renewal, so two copies of the same login would end up invalidating each other.
 
-Consequências:
+As a result:
 
-- As pastas em `.claude-contas` funcionam como "vagas": depois de uma troca, a pasta `fulano` pode guardar outra conta. O painel sempre mostra o e-mail certo.
-- Abra uma sessão nova do Claude Code depois de trocar. Nas sessões que já estavam abertas, confira com `/status`.
+- The folders in `.claude-contas` act as "slots": after a switch, the folder `someone` may hold a different account. The panel always shows the right email.
+- Open a new Claude Code session after switching. In sessions that were already open, check with `/status`.
 
-## Menu (clique direito)
+## Menu (right-click)
 
-| Item | O que faz |
+| Item | What it does |
 | --- | --- |
-| Abrir painel | Mostra o painel (o mesmo do clique esquerdo) |
-| Trocar conta do Claude Code | Lista as contas com o uso atual; inclui atalho para a conta com mais folga |
-| Atualizar agora | Consulta o uso de todas as contas (`F5` no painel também) |
-| Adicionar conta... | Cria a pasta da conta e abre o login |
-| Abrir pasta das contas | Abre `%USERPROFILE%\.claude-contas` |
-| Atualizar a cada | Intervalo de consulta: 2, 5 (padrão), 10, 15 ou 30 min |
-| Notificações | Liga/desliga os avisos |
-| Iniciar com o Windows | Liga/desliga a entrada em `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` |
+| Abrir painel | Opens the panel (same as left-click) |
+| Trocar conta do Claude Code | Lists accounts with current usage; includes a shortcut to the account with the most headroom |
+| Atualizar agora | Fetches usage for all accounts now (`F5` in the panel does the same) |
+| Adicionar conta... | Creates the account folder and opens the login |
+| Abrir pasta das contas | Opens `%USERPROFILE%\.claude-contas` |
+| Atualizar a cada | Polling interval: 2, 5 (default), 10, 15 or 30 min |
+| Notificações | Turns notifications on/off |
+| Iniciar com o Windows | Turns the entry in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` on/off |
 
-As preferências ficam em `%APPDATA%\ClaudeUsageTray\settings.json`.
+Preferences are stored in `%APPDATA%\ClaudeUsageTray\settings.json`.
 
-## Como funciona
+## How it works
 
-- O uso vem de `GET https://api.anthropic.com/api/oauth/usage`, o mesmo endpoint que o comando `/usage` do Claude Code consulta, autenticado com o token OAuth de cada `.credentials.json`.
-- O e-mail de cada conta vem de `GET /api/oauth/profile`.
-- Quando o token está perto de vencer, o app o renova em `https://platform.claude.com/v1/oauth/token` e grava o resultado de volta no `.credentials.json` (de forma atômica). O Claude Code percebe a mudança do arquivo e passa a usar o token novo.
-- Logo depois de um limite resetar, o app faz uma consulta extra para atualizar os números.
+- Usage comes from `GET https://api.anthropic.com/api/oauth/usage`, the same endpoint Claude Code's `/usage` command calls, authenticated with the OAuth token from each `.credentials.json`.
+- Each account's email comes from `GET /api/oauth/profile`.
+- When a token is about to expire, the app renews it at `https://platform.claude.com/v1/oauth/token` and writes the result back to `.credentials.json` (atomically). Claude Code notices the file change and picks up the new token.
+- Right after a limit resets, the app polls once more to refresh the numbers.
 
-## Avisos
+## Caveats
 
-- **Projeto não oficial**, sem vínculo com a Anthropic.
-- O endpoint `/api/oauth/usage` **não é documentado** e pode mudar sem aviso.
-- Os tokens ficam em texto puro nos `.credentials.json`, do mesmo jeito que o Claude Code já os guarda no Windows. Qualquer pessoa com acesso ao seu usuário do Windows consegue lê-los.
-- Se uma versão futura do Claude Code passar a guardar o login no Gerenciador de Credenciais do Windows em vez do arquivo, o app deixa de enxergar e de trocar as contas.
+- **Unofficial project**, not affiliated with Anthropic.
+- The `/api/oauth/usage` endpoint is **undocumented** and may change without notice.
+- Tokens are stored in plain text in the `.credentials.json` files, the same way Claude Code already stores them on Windows. Anyone with access to your Windows user can read them.
+- If a future Claude Code version starts storing logins in Windows Credential Manager instead of the file, the app will no longer see or switch accounts.
 
-## Desinstalar
+## Uninstalling
 
-1. Clique direito no ícone, desmarque **Iniciar com o Windows** e clique em **Sair**.
-2. Apague a pasta do projeto e `%APPDATA%\ClaudeUsageTray`.
-3. Se não quiser mais as contas extras, apague `%USERPROFILE%\.claude-contas` (isso desloga essas contas desta máquina).
+1. Right-click the icon, uncheck **Iniciar com o Windows** and click **Sair** (Exit).
+2. Delete the project folder and `%APPDATA%\ClaudeUsageTray`.
+3. If you no longer want the extra accounts, delete `%USERPROFILE%\.claude-contas` (this signs those accounts out of this machine).
