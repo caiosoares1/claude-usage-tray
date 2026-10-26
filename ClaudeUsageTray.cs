@@ -381,18 +381,22 @@ namespace ClaudeUsageTray
             catch { return null; }
         }
 
-        // Retry-After in seconds or as an HTTP date.
+        // Retry-After in seconds or as an HTTP date. The usage endpoint answers 429 with "Retry-After: 0",
+        // which says nothing: a wait that is zero or already over counts as missing, so the backoff applies.
         static TimeSpan? RetryAfter(WebHeaderCollection headers)
         {
             string value = headers == null ? null : headers["Retry-After"];
             if (string.IsNullOrEmpty(value)) return null;
-            int seconds;
-            if (int.TryParse(value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out seconds))
-                return TimeSpan.FromSeconds(Math.Max(30, seconds + 5));
+            double seconds;
+            int asInt;
             DateTime at;
-            if (DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out at))
-                return TimeSpan.FromSeconds(Math.Max(30, (at - DateTime.UtcNow).TotalSeconds + 5));
-            return null;
+            if (int.TryParse(value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out asInt))
+                seconds = asInt;
+            else if (DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out at))
+                seconds = (at - DateTime.UtcNow).TotalSeconds;
+            else
+                return null;
+            return seconds <= 0 ? (TimeSpan?)null : TimeSpan.FromSeconds(Math.Max(60, seconds + 5));
         }
 
         static List<Limit> ParseUsage(Dictionary<string, object> usage)
