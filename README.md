@@ -1,12 +1,12 @@
 # Claude Usage Tray
 
-App de bandeja do Windows que mostra o uso dos limites do plano Claude (sessão de 5h e semanal) de **várias contas ao mesmo tempo**, avisa quando uma conta está chegando no limite e troca a conta usada pelo Claude Code com um clique.
+Monitor para Windows que fica ao lado do relógio, na barra de tarefas, e mostra o uso dos limites do plano Claude (sessão de 5h e semanal) de **várias contas ao mesmo tempo**, avisa quando uma conta está chegando no limite e troca a conta usada pelo Claude Code com um clique.
 
 ![Painel](docs/painel.png)
 
 ## Recursos
 
-- **Ícone na bandeja** com uma barrinha por conta, preenchida pelo limite mais apertado dela: verde (< 70%), amarelo (70–90%), vermelho (≥ 90%).
+- **Ícone ao lado do relógio** com uma barrinha por conta, preenchida pelo limite mais apertado dela: verde (< 70%), amarelo (70–90%), vermelho (≥ 90%).
 - **Painel** (clique esquerdo no ícone) com a sessão de 5h, o limite semanal e outros limites que o plano tiver, mostrando a porcentagem e quando cada um reseta.
 - **Notificações** quando uma conta passa de 80%, chega a 100% e quando é liberada de novo.
 - **Troca rápida de conta**: a conta escolhida passa a ser a padrão do Claude Code, mantendo suas configurações, plugins e histórico do `~/.claude`.
