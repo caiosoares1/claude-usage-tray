@@ -624,6 +624,9 @@ namespace ClaudeUsageTray
         public string IngestUrl;
         string ingestSecretProtected;
 
+        // Account email -> BrowserProfile.Key of the profile where that account is signed in to claude.ai.
+        public Dictionary<string, string> BrowserProfiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
         static string FilePath { get { return Path.Combine(Paths.AppData, "settings.json"); } }
 
         // The integration secret is stored encrypted for the current Windows user (DPAPI).
@@ -658,6 +661,10 @@ namespace ClaudeUsageTray
                 if (Json.Get(d, "notify") is bool) s.Notify = (bool)Json.Get(d, "notify");
                 s.IngestUrl = Json.Str(d, "ingestUrl");
                 s.ingestSecretProtected = Json.Str(d, "ingestSecret");
+                var profiles = Json.Get(d, "browserProfiles") as Dictionary<string, object>;
+                if (profiles != null)
+                    foreach (var p in profiles)
+                        if (p.Value is string) s.BrowserProfiles[p.Key] = (string)p.Value;
             }
             catch { }
             return s;
@@ -673,6 +680,7 @@ namespace ClaudeUsageTray
                 d["notify"] = Notify;
                 if (!string.IsNullOrEmpty(IngestUrl)) d["ingestUrl"] = IngestUrl;
                 if (!string.IsNullOrEmpty(ingestSecretProtected)) d["ingestSecret"] = ingestSecretProtected;
+                if (BrowserProfiles.Count > 0) d["browserProfiles"] = BrowserProfiles;
                 File.WriteAllText(FilePath, Json.Write(d), new UTF8Encoding(false));
             }
             catch { }
@@ -858,6 +866,67 @@ namespace ClaudeUsageTray
         }
     }
 
+    // A profile of a Chromium browser, as listed in the browser's Local State.
+    class BrowserProfile
+    {
+        public string Browser, Exe, Dir, Name, User;
+
+        public string Key { get { return Browser + "|" + Dir; } }
+
+        public string Label
+        {
+            get { return Browser + " · " + Name + (string.IsNullOrEmpty(User) ? "" : " (" + User + ")"); }
+        }
+    }
+
+    // The claude.ai login is a cookie the browser encrypts for itself, so it can't be moved like the Claude Code
+    // login. What the app can do is open claude.ai in the browser profile where the account is signed in.
+    static class Browsers
+    {
+        // Name, executable (resolved through App Paths) and user data folder under %LOCALAPPDATA%.
+        static readonly string[,] Known =
+        {
+            { "Chrome", "chrome.exe", @"Google\Chrome\User Data" },
+            { "Edge", "msedge.exe", @"Microsoft\Edge\User Data" },
+            { "Brave", "brave.exe", @"BraveSoftware\Brave-Browser\User Data" }
+        };
+
+        public static List<BrowserProfile> Profiles()
+        {
+            var list = new List<BrowserProfile>();
+            string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            for (int i = 0; i < Known.GetLength(0); i++)
+            {
+                try
+                {
+                    string path = Path.Combine(local, Known[i, 2], "Local State");
+                    if (!File.Exists(path)) continue;
+                    var profile = Json.Get(Json.ReadFile(path), "profile") as Dictionary<string, object>;
+                    var cache = Json.Get(profile, "info_cache") as Dictionary<string, object>;
+                    if (cache == null) continue;
+                    foreach (var p in cache)
+                    {
+                        var info = p.Value as Dictionary<string, object>;
+                        list.Add(new BrowserProfile
+                        {
+                            Browser = Known[i, 0], Exe = Known[i, 1], Dir = p.Key,
+                            Name = Json.Str(info, "name") ?? p.Key, User = Json.Str(info, "user_name")
+                        });
+                    }
+                }
+                catch { }
+            }
+            return list;
+        }
+
+        // Returns null when the browser was started, otherwise the error.
+        public static string OpenClaudeAi(BrowserProfile p)
+        {
+            try { Process.Start(p.Exe, "--profile-directory=\"" + p.Dir + "\" https://claude.ai"); return null; }
+            catch (Exception ex) { return "não deu para abrir o " + p.Browser + " (" + ex.Message + ")"; }
+        }
+    }
+
     class Theme
     {
         public Color Bg, Text, Muted, Border, Track, Accent, Green, Amber, Red;
@@ -1018,12 +1087,28 @@ namespace ClaudeUsageTray
                 else
                 {
                     main.SwapIdentity(target);
-                    Balloon("Conta trocada", "Claude Code agora usa " + main.Name + ". Abra uma sessão nova; nas abertas confira com /status.", ToolTipIcon.Info, null);
+                    string browser = "";
+                    var profile = LinkedProfile(main.Email);
+                    if (profile != null)
+                    {
+                        string error = Browsers.OpenClaudeAi(profile);
+                        browser = error == null ? " claude.ai aberto em " + profile.Label + "." : " Navegador: " + error + ".";
+                    }
+                    Balloon("Conta trocada", "Claude Code agora usa " + main.Name + "." + browser + " Abra uma sessão nova; nas abertas confira com /status.", ToolTipIcon.Info, null);
                 }
                 UpdateTray();
                 popup.Relayout();
                 Refresh(true);
             })));
+        }
+
+        // The browser profile linked to the email. One that no longer exists counts as none: started with a
+        // missing --profile-directory, the browser would create a new, empty profile.
+        BrowserProfile LinkedProfile(string email)
+        {
+            string key;
+            if (email == null || !settings.BrowserProfiles.TryGetValue(email, out key)) return null;
+            return Browsers.Profiles().FirstOrDefault(p => p.Key == key);
         }
 
         // Pushes the latest usage to Way Project when the integration is configured.
@@ -1342,6 +1427,7 @@ namespace ClaudeUsageTray
             use.Enabled = !a.IsMain && a.HasCredentials;
             use.Font = new Font(use.Font, FontStyle.Bold);
             m.Items.Add(new ToolStripSeparator());
+            AddBrowserItems(m, a);
             m.Items.Add(a.HasCredentials ? "Relogar esta conta" : "Fazer login nesta conta", null, (s, e) => Login(a.Dir, a.IsMain));
             m.Items.Add("Copiar comando para usar no terminal (PowerShell)", null, (s, e) => Clipboard.SetText(UseCommand(a)));
             m.Items.Add("Abrir pasta da conta", null, (s, e) => Process.Start("explorer.exe", "\"" + a.Dir + "\""));
@@ -1349,6 +1435,40 @@ namespace ClaudeUsageTray
             popup.MenuOpen = true;
             m.Closed += (s, e) => popup.MenuOpen = false;
             m.Show(owner, location);
+        }
+
+        // Links the account to the browser profile where it is signed in to claude.ai; switching to the account opens it there.
+        void AddBrowserItems(ContextMenuStrip m, Account a)
+        {
+            string email = a.Email; // a switch can move the account to another slot while the menu is open
+            var menu = new ToolStripMenuItem("Perfil do navegador para o claude.ai") { Enabled = email != null };
+            if (email == null) { m.Items.Add(menu); return; }
+
+            string current;
+            settings.BrowserProfiles.TryGetValue(email, out current);
+            var profiles = Browsers.Profiles();
+            var linked = profiles.FirstOrDefault(p => p.Key == current);
+            if (linked != null)
+                m.Items.Add("Abrir claude.ai em " + linked.Label, null, (s, e) =>
+                {
+                    string error = Browsers.OpenClaudeAi(linked);
+                    if (error != null) Balloon("Navegador", error, ToolTipIcon.Error, null);
+                });
+
+            foreach (var p in profiles)
+            {
+                var profile = p;
+                var item = new ToolStripMenuItem(p.Label) { Checked = p.Key == current };
+                item.Click += (s, e) => { settings.BrowserProfiles[email] = profile.Key; settings.Save(); };
+                menu.DropDownItems.Add(item);
+            }
+            if (profiles.Count == 0)
+                menu.DropDownItems.Add(new ToolStripMenuItem("Nenhum perfil do Chrome, Edge ou Brave encontrado") { Enabled = false });
+            menu.DropDownItems.Add(new ToolStripSeparator());
+            var none = new ToolStripMenuItem("Nenhum: não abrir o navegador ao trocar") { Checked = linked == null };
+            none.Click += (s, e) => { settings.BrowserProfiles.Remove(email); settings.Save(); };
+            menu.DropDownItems.Add(none);
+            m.Items.Add(menu);
         }
 
         protected override void ExitThreadCore()

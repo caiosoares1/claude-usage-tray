@@ -58,6 +58,12 @@ As a result:
 - The folders in `.claude-contas` act as "slots": after a switch, the folder `someone` may hold a different account. The panel always shows the right email.
 - Open a new Claude Code session after switching. In sessions that were already open, check with `/status`.
 
+### Opening claude.ai in the matching browser profile
+
+The claude.ai login in the browser is a separate cookie, encrypted by the browser, so the app can't move it the way it moves Claude Code's login. Instead, link each account to the Chrome, Edge or Brave profile where it is signed in to claude.ai: click the account in the panel → **Perfil do navegador para o claude.ai** and pick the profile. From then on, switching to that account also opens claude.ai in that profile, and the account's menu gains **Abrir claude.ai em ...**.
+
+The link follows the account's email, not its folder, so it survives switches. Profiles are read from each browser's `Local State`; a linked profile that no longer exists is ignored instead of making the browser create a new one.
+
 ## Menu (right-click)
 
 | Item | What it does |
