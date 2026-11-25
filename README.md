@@ -45,6 +45,10 @@ The account logged in to Claude Code (`~/.claude`) shows up automatically. For t
 
 > The login uses whichever account is signed in to your browser. Before authorizing, switch accounts on claude.ai or open the link in a private window.
 
+### When a login expires
+
+The app renews the 8-hour access token on its own, but the login itself has a fixed deadline (`refreshTokenExpiresAt` in the account's `.credentials.json`) that renewing does not push back. Past it, the panel shows **login expirou: clique para relogar**. Click the account → **Relogar esta conta**: the terminal runs `claude auth login --email <the account's email>`, so the login page asks for that account rather than whichever one the browser is signed in to. Press a key once the login finishes; the panel refreshes when the terminal closes.
+
 Each folder in `.claude-contas` is an independent `CLAUDE_CONFIG_DIR`. To use a specific account in a single terminal only, click it in the panel and choose **Copiar comando para usar no terminal** (Copy command to use in the terminal).
 
 ## Switching Claude Code's account

@@ -1396,15 +1396,19 @@ namespace ClaudeUsageTray
                 return;
             }
             Directory.CreateDirectory(dir);
-            Login(dir, false);
+            Login(dir, false, null);
             Refresh(true);
         }
 
-        // Opens a console running `claude auth login` against the account's config dir.
-        void Login(string dir, bool isMain)
+        // Opens a console running `claude auth login` against the account's config dir. When the account's email
+        // is known it goes in --email, so the login page asks for that account instead of whichever one the
+        // browser is signed in to. The email ends up on a cmd.exe line, so only plain addresses are passed.
+        void Login(string dir, bool isMain, string email)
         {
             Directory.CreateDirectory(dir);
-            var psi = new ProcessStartInfo("cmd.exe", "/c title Login Claude - " + (isMain ? "principal" : Path.GetFileName(dir)) + " & claude auth login & echo. & pause");
+            string login = "claude auth login";
+            if (email != null && Regex.IsMatch(email, @"^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$")) login += " --email " + email;
+            var psi = new ProcessStartInfo("cmd.exe", "/c title Login Claude - " + (isMain ? "principal" : Path.GetFileName(dir)) + " & " + login + " & echo. & pause");
             psi.UseShellExecute = false;
             if (isMain && string.IsNullOrEmpty(Paths.EnvConfigDir)) psi.EnvironmentVariables.Remove("CLAUDE_CONFIG_DIR");
             else psi.EnvironmentVariables["CLAUDE_CONFIG_DIR"] = dir;
@@ -1428,7 +1432,7 @@ namespace ClaudeUsageTray
             use.Font = new Font(use.Font, FontStyle.Bold);
             m.Items.Add(new ToolStripSeparator());
             AddBrowserItems(m, a);
-            m.Items.Add(a.HasCredentials ? "Relogar esta conta" : "Fazer login nesta conta", null, (s, e) => Login(a.Dir, a.IsMain));
+            m.Items.Add(a.HasCredentials ? "Relogar esta conta" : "Fazer login nesta conta", null, (s, e) => Login(a.Dir, a.IsMain, a.Email));
             m.Items.Add("Copiar comando para usar no terminal (PowerShell)", null, (s, e) => Clipboard.SetText(UseCommand(a)));
             m.Items.Add("Abrir pasta da conta", null, (s, e) => Process.Start("explorer.exe", "\"" + a.Dir + "\""));
             m.Closed += (s, e) => owner.BeginInvoke((Action)m.Dispose);
